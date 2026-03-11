@@ -50,3 +50,5 @@ HEAD можно использовать для проверки на сущес
 ![alt text](screenshots/13-logs.jpg)
 
 ![alt text](screenshots/14-log-stats.jpg)
+
+![alt text](screenshots/15-pull-request.png)
