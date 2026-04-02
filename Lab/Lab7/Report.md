@@ -55,3 +55,5 @@ JSON - для программ (API):машиночитаемый формат,
 легко парсить кодом, только данные без оформления, используется в API для интеграций
 
 ![alt text](screenshots/16-processes.png)
+
+![alt text](screenshots/17-pull-request.png)
