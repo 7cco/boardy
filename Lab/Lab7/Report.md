@@ -37,7 +37,8 @@ Uvicorn не уничтожает состояние после запроса, 
 ![alt text](screenshots/11-blocking.png)
 Они отличаются использованием time.sleep, которая блокирует параллельность, поэтому и длится дольше
 
-docs не открывается
+![alt text](screenshots/12-swagger.png)
+docs из следующей практики
 
 ![alt text](screenshots/13-systemd.png)
 
