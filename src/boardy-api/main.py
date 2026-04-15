@@ -1,9 +1,21 @@
 from fastapi import FastAPI
 from datetime import datetime
 import aiomysql
+from routers import comments
+from fastapi.middleware.cors import CORSMiddleware
+
 
 app = FastAPI(title='Boardy API', version='0.2.0')
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # В продакшене укажите конкретные домены!
+    allow_credentials=True,
+    allow_methods=["*"],  # GET, POST, PUT, DELETE, OPTIONS...
+    allow_headers=["*"],  # Content-Type, Authorization...
+)
+
+app.include_router(comments.router)
 
 DB_CONFIG = {
 	'host': '127.0.0.1',
