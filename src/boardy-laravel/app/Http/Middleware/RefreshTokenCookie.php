@@ -10,48 +10,46 @@ class RefreshTokenCookie
 {
     public function handle(Request $request, Closure $next)
     {
-        $response = $next($request);
-
-        \Log::info('RefreshTokenCookie middleware', [
-            'path' => $request->path(),
-            'is_oauth_token' => $request->is('oauth/token'),
-            'response_status' => $response->getStatusCode(),
-        ]);
-
-        if ($request->is('oauth/token') && $response->isOk()) {
-            $content = json_decode($response->getContent(), true);
-
-            \Log::info('OAuth token response', ['content' => $content]);
-
-            if (isset($content['refresh_token'])) {
-                $refreshToken = $content['refresh_token'];
-                
-                unset($content['refresh_token']);
-                $response->setContent(json_encode($content));
-
-                $response->headers->setCookie(new Cookie(
-                    'refresh_token',
-                    $refreshToken,
-                    60 * 24 * 30,
-                    '/',
-                    null,
-                    true,   // Secure
-                    true,   // HttpOnly
-                    false,  // Raw
-                    false,
-                    'Strict'
-                ));
-                \Log::info('Refresh token cookie set');
-            }
-            else {
-                \Log::warning('No refresh_token in response');
-            }
+        if (
+            $request->is('oauth/token')
+            && $request->input('grant_type') === 'refresh_token'
+            && !$request->input('refresh_token')
+            && $request->cookie('refresh_token')
+        ) {
+            $request->merge([
+                'refresh_token' => $request->cookie('refresh_token'),
+            ]);
         }
 
-        \Log::info('Final check', [
-    'has_cookie' => $response->headers->has('Set-Cookie'),
-    'cookies' => $response->headers->getCookies(),
-]);
+        $response = $next($request);
+
+        if (!$request->is('oauth/token') || !$response->isOk()) {
+            return $response;
+        }
+
+        $content = json_decode($response->getContent(), true);
+
+        if (!is_array($content) || !isset($content['refresh_token'])) {
+            return $response;
+        }
+
+        $refreshToken = $content['refresh_token'];
+
+        unset($content['refresh_token']);
+        $response->setContent(json_encode($content));
+
+        $response->headers->setCookie(new Cookie(
+            'refresh_token',
+            $refreshToken,
+            now()->addDays(30)->getTimestamp(), 
+            '/',
+            null,    // domain
+            true,    // secure
+            true,    // httpOnly
+            false,   // raw
+            'Strict' // sameSite
+        ));
+
         return $response;
     }
 }

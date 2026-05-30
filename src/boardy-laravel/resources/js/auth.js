@@ -21,7 +21,7 @@ export async function startLogin() {
         state: state,
         scope: '*',
     });
-
+    console.log('🔐 [startLogin] Начало OAuth flow');
     window.location = '/oauth/authorize?' + params.toString();
 }
 if (typeof window !== 'undefined') {
@@ -105,52 +105,23 @@ export async function handleCallback() {
 }
 
 export async function refreshToken() {
-    console.log('🔄 [refreshToken] Попытка обновить токен');
-    
-    const refresh = sessionStorage.getItem('refresh_token');
-    if (!refresh) {
-        console.log('⚠️ [refreshToken] Нет refresh_token, начинаем новый login');
+    const res = await fetch('/oauth/token', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: new URLSearchParams({
+            grant_type: 'refresh_token',
+            client_id: CLIENT_ID,
+        }),
+    });
+
+    if (!res.ok) {
         startLogin();
         return null;
     }
 
-    try {
-        const res = await fetch('/oauth/token', {
-            method: 'POST',
-            credentials: 'include',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                grant_type: 'refresh_token',
-                client_id: CLIENT_ID,
-                refresh_token: refresh,  // ← передаём из sessionStorage
-            }),
-        });
-
-        if (!res.ok) {
-            console.error('❌ [refreshToken] Refresh failed:', res.status);
-            sessionStorage.removeItem('refresh_token');
-            sessionStorage.removeItem('access_token');
-            startLogin();
-            return null;
-        }
-
-        const data = await res.json();
-        console.log('✅ [refreshToken] Новые токены получены');
-        
-        if (data.access_token) {
-            sessionStorage.setItem('access_token', data.access_token);
-        }
-        if (data.refresh_token) {
-            sessionStorage.setItem('refresh_token', data.refresh_token);
-        }
-        
-        return data.access_token;
-        
-    } catch (err) {
-        console.error('❌ [refreshToken] Ошибка:', err);
-        startLogin();
-        return null;
-    }
+    const data = await res.json();
+    return data.access_token;
 }
 
 // ← Утилита: получить текущий токен (для отладки)

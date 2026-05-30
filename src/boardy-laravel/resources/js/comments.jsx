@@ -1,196 +1,294 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
-import { startLogin, handleCallback, refreshToken, getCurrentToken } from './auth.js';
+import { startLogin, handleCallback, refreshToken } from './auth.js';
 
 const API_BASE = 'https://api.terramorf.ai-info.ru';
 
-function Comments({ postId, userName }) {
+
+function Comments({ postId, userName, currentUserId }) {
     const [token, setToken] = useState(null);
     const [comments, setComments] = useState([]);
     const [body, setBody] = useState('');
-    const [isLoading, setIsLoading] = useState(true);
+    const [editingId, setEditingId] = useState(null);
+    const [editBody, setEditBody] = useState('');
     const wsRef = useRef(null);
 
-     useEffect(() => {
-        const savedToken = getCurrentToken();
-        if (savedToken) {
-            console.log('✅ [Comments] Токен найден в sessionStorage');
-            setToken(savedToken);
-        }
+    // 1. Обработать OAuth callback после редиректа
+    useEffect(() => {
+        handleCallback().then(t => {
+            if (t) {
+                sessionStorage.setItem('access_token', t);
+                setToken(t);
+            }
+        });
+
+        // Проверяем сохранённый токен
+        const saved = sessionStorage.getItem('access_token');
+        if (saved) setToken(saved);
     }, []);
 
+    // 2. Загрузить комментарии (без авторизации — GET публичный)
     useEffect(() => {
-        fetchComments();
+        fetch(`${API_BASE}/api/posts/${postId}/comments`)
+            .then(r => r.json())
+            .then(data => {
+                if (Array.isArray(data)) setComments(data);
+            })
+            .catch(err => console.error('Ошибка загрузки комментариев:', err));
     }, [postId]);
 
-    // Проверяем callback (если мы на /oauth/callback?code=...)
+    // 3. WebSocket подписка (без авторизации)
     useEffect(() => {
-        if (window.location.search.includes('code=')) {
-            console.log('🔍 [Comments] Обнаружен callback URL');
-            handleCallback().then(t => {
-                if (t) {
-                    console.log('✅ [Comments] Токен получен из callback');
-                    setToken(t);
-                    // Убираем code/state из URL без перезагрузки
-                    window.history.replaceState({}, document.title, window.location.pathname);
-                }
-            }).catch(err => {
-                console.error('❌ [Comments] Ошибка callback:', err);
-            });
-        }
-    }, []);
-
-    // WebSocket только если есть токен
-    useEffect(() => {
-        if (token) {
-            connectWebSocket();
-        }
-    }, [token]);
-
-    async function fetchComments() {
-        console.log('🔍 [fetchComments] Загрузка для postId:', postId);
-        try {
-            const res = await fetch(`${API_BASE}/api/posts/${postId}/comments`);
-            console.log('🔍 [fetchComments] Ответ:', res.status);
-            
-            if (res.ok) {
-                const data = await res.json();
-                console.log('✅ [fetchComments] Получено комментариев:', data.length);
-                setComments(data);
-            } else {
-                console.error('❌ [fetchComments] Ошибка:', await res.text());
-            }
-        } catch (e) {
-            console.error('❌ [fetchComments] Исключение:', e);
-        } finally {
-            // ← ✅ Сбрасываем isLoading ТОЛЬКО после завершения запроса
-            setIsLoading(false);
-            console.log('✅ [fetchComments] isLoading = false');
-        }
-    }
-
-    function connectWebSocket() {
         const ws = new WebSocket(`wss://api.terramorf.ai-info.ru/ws`);
-        ws.onopen = () => console.log('✅ [WS] Connected');
-        ws.onmessage = (event) => {
-            const msg = JSON.parse(event.data);
-            if (msg.type === 'new_comment' && msg.comment.post_id === postId) {
-                setComments(prev => [...prev, msg.comment]);
+        wsRef.current = ws;
+
+        ws.onmessage = (e) => {
+            const msg = JSON.parse(e.data);
+            if (msg.type === 'new_comment' && msg.comment.post_id == postId) {
+                setComments(prev => {
+                    // Не добавляем дубликат
+                    if (prev.some(c => c.id === msg.comment.id)) return prev;
+                    return [...prev, msg.comment];
+                });
+            } else if (msg.type === 'update_comment') {
+                setComments(prev => prev.map(c =>
+                    c.id === msg.comment.id ? { ...c, body: msg.comment.body } : c
+                ));
             } else if (msg.type === 'delete_comment') {
                 setComments(prev => prev.filter(c => c.id !== msg.comment_id));
+            } else if (msg.type === 'user_renamed') {
+                setComments(prev => prev.map(c =>
+                    String(c.author_id) === String(msg.user_id)
+                        ? { ...c, author_name: msg.new_name }
+                        : c
+                ));
             }
         };
-        wsRef.current = ws;
-    }
 
+        ws.onclose = () => {
+            console.log('WS closed');
+        };
+
+        return () => {
+            ws.close();
+            wsRef.current = null;
+        };
+    }, [postId]);
+
+    // Fetch с автообновлением токена при 401
     async function authedFetch(url, options = {}) {
+        let currentToken = token || sessionStorage.getItem('access_token');
+        if (!currentToken) return null;
+
         let response = await fetch(url, {
             ...options,
             headers: {
                 ...options.headers,
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json'
+                'Authorization': `Bearer ${currentToken}`,
             }
         });
 
         if (response.status === 401) {
-            console.log('⚠️ [authedFetch] 401, пробуем refresh');
             const newToken = await refreshToken();
             if (!newToken) return null;
+            sessionStorage.setItem('access_token', newToken);
             setToken(newToken);
             return fetch(url, {
                 ...options,
                 headers: {
                     ...options.headers,
                     'Authorization': `Bearer ${newToken}`,
-                    'Content-Type': 'application/json'
                 }
             });
         }
         return response;
     }
 
+    // ─── CREATE ───
     async function addComment(e) {
         e.preventDefault();
-        if (!body.trim() || !userName || !token) {
-            alert('Ошибка авторизации');
-            return;
-        }
+        if (!body.trim()) return;
 
         const res = await authedFetch(`${API_BASE}/api/posts/${postId}/comments`, {
             method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ body, author_name: userName })
         });
 
+        if (res?.ok) setBody('');
+    }
+
+    // ─── UPDATE ───
+    async function saveEdit(commentId) {
+        if (!editBody.trim()) return;
+
+        const res = await authedFetch(`${API_BASE}/api/comments/${commentId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ body: editBody })
+        });
+
         if (res?.ok) {
-            setBody('');
-            // Комментарий придёт по WebSocket
-        } else {
-            alert('Не удалось отправить комментарий');
+            setEditingId(null);
+            setEditBody('');
         }
     }
 
-    useEffect(() => {
-        return () => {
-            if (wsRef.current?.readyState === WebSocket.OPEN) {
-                wsRef.current.close();
-            }
-        };
-    }, []);
+    // ─── DELETE ───
+    async function deleteComment(commentId) {
+        if (!confirm('Удалить комментарий?')) return;
 
-    if (isLoading) return <p>Загрузка...</p>;
+        await authedFetch(`${API_BASE}/api/comments/${commentId}`, {
+            method: 'DELETE',
+        });
+    }
+
+    function startEditing(comment) {
+        setEditingId(comment.id);
+        setEditBody(comment.body);
+    }
+
+    function cancelEditing() {
+        setEditingId(null);
+        setEditBody('');
+    }
+
+    const isOwner = (comment) => String(comment.author_id) === String(currentUserId);
 
     return (
-    <div style={{ marginTop: '2rem' }}>
-        <h3>Комментарии ({comments.length})</h3>
-        
-        {/* Список комментариев — ВСЕГДА виден */}
-        <div style={{ marginBottom: '1.5rem' }}>
-            {comments.length === 0 ? (
-                <p style={{ color: '#666' }}>Комментариев пока нет.</p>
+        <div style={{ marginTop: '20px' }}>
+            <h3 style={{ marginBottom: '12px' }}>Комментарии ({comments.length})</h3>
+
+            {/* Список комментариев — видны всем */}
+            <ul style={{ listStyle: 'none', padding: 0 }}>
+                {comments.map(c => (
+                    <li key={c.id} style={{
+                        borderBottom: '1px solid #eee',
+                        padding: '10px 0',
+                        marginBottom: '4px'
+                    }}>
+                        {editingId === c.id ? (
+                            /* Режим редактирования */
+                            <div>
+                                <textarea
+                                    value={editBody}
+                                    onChange={e => setEditBody(e.target.value)}
+                                    style={{ width: '100%', minHeight: '60px', marginBottom: '8px' }}
+                                />
+                                <button
+                                    onClick={() => saveEdit(c.id)}
+                                    style={{
+                                        padding: '4px 12px', background: '#10b981',
+                                        color: 'white', border: 'none', borderRadius: '4px',
+                                        cursor: 'pointer', marginRight: '8px'
+                                    }}
+                                >
+                                    Сохранить
+                                </button>
+                                <button
+                                    onClick={cancelEditing}
+                                    style={{
+                                        padding: '4px 12px', background: '#6b7280',
+                                        color: 'white', border: 'none', borderRadius: '4px',
+                                        cursor: 'pointer'
+                                    }}
+                                >
+                                    Отмена
+                                </button>
+                            </div>
+                        ) : (
+                            /* Режим просмотра */
+                            <div>
+                                <div>
+                                    <strong>{c.author_name}</strong>
+                                    <span style={{ color: '#999', fontSize: '0.85em', marginLeft: '8px' }}>
+                                        {c.created_at ? new Date(c.created_at).toLocaleString() : ''}
+                                    </span>
+                                </div>
+                                <div style={{ margin: '4px 0', whiteSpace: 'pre-wrap' }}>{c.body}</div>
+
+                                {/* Кнопки редактирования/удаления — только для владельца */}
+                                {token && isOwner(c) && (
+                                    <div style={{ marginTop: '4px' }}>
+                                        <button
+                                            onClick={() => startEditing(c)}
+                                            style={{
+                                                padding: '2px 8px', fontSize: '0.85em',
+                                                background: '#3b82f6', color: 'white',
+                                                border: 'none', borderRadius: '3px',
+                                                cursor: 'pointer', marginRight: '6px'
+                                            }}
+                                        >
+                                            Редактировать
+                                        </button>
+                                        <button
+                                            onClick={() => deleteComment(c.id)}
+                                            style={{
+                                                padding: '2px 8px', fontSize: '0.85em',
+                                                background: '#ef4444', color: 'white',
+                                                border: 'none', borderRadius: '3px',
+                                                cursor: 'pointer'
+                                            }}
+                                        >
+                                            Удалить
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </li>
+                ))}
+            </ul>
+
+            {comments.length === 0 && (
+                <p style={{ color: '#999', fontStyle: 'italic' }}>Комментариев пока нет.</p>
+            )}
+
+            {/* Форма — только для авторизованных */}
+            {token ? (
+                <form onSubmit={addComment} style={{ marginTop: '16px' }}>
+                    <textarea
+                        value={body}
+                        onChange={e => setBody(e.target.value)}
+                        placeholder="Написать комментарий..."
+                        style={{
+                            width: '100%', minHeight: '80px',
+                            padding: '8px', borderRadius: '4px',
+                            border: '1px solid #ddd', marginBottom: '8px'
+                        }}
+                    />
+                    <button
+                        type="submit"
+                        style={{
+                            padding: '6px 16px', background: '#10b981',
+                            color: 'white', border: 'none', borderRadius: '4px',
+                            cursor: 'pointer', fontWeight: '500'
+                        }}
+                    >
+                        Отправить
+                    </button>
+                </form>
             ) : (
-                comments.map(c => (
-                    <div key={c.id} style={{ padding: '1rem', background: '#f9f9f9', borderRadius: '4px', marginBottom: '0.75rem', border: '1px solid #eee' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                            <strong>{c.author_name}</strong>
-                            <small style={{ color: '#666' }}>
-                                {new Date(c.created_at).toLocaleString('ru-RU')}
-                            </small>
-                        </div>
-                        <p style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{c.body}</p>
-                    </div>
-                ))
+                <div style={{
+                    marginTop: '16px', padding: '12px',
+                    background: '#f1f5f9', borderRadius: '4px', textAlign: 'center'
+                }}>
+                    <button
+                        onClick={startLogin}
+                        style={{
+                            padding: '8px 20px', background: '#3b82f6',
+                            color: 'white', border: 'none', borderRadius: '4px',
+                            cursor: 'pointer', fontWeight: '500'
+                        }}
+                    >
+                        Войти через OAuth, чтобы комментировать
+                    </button>
+                </div>
             )}
         </div>
-
-        {/* Форма или кнопка — в зависимости от токена */}
-        {token ? (
-            <form onSubmit={addComment}>
-                <textarea 
-                    value={body} 
-                    onChange={e => setBody(e.target.value)} 
-                    placeholder="Напишите комментарий..." 
-                    required
-                    style={{ width: '100%', padding: '0.5rem', border: '1px solid #ccc', borderRadius: '4px' }}
-                />
-                <button type="submit" style={{ marginTop: '0.5rem', padding: '0.5rem 1rem', background: '#28a745', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
-                    Отправить
-                </button>
-            </form>
-        ) : (
-            <div style={{ marginTop: '1rem', padding: '1rem', background: '#f9f9f9', borderRadius: '4px' }}>
-                <p>Чтобы оставить комментарий, необходимо войти.</p>
-                <button 
-                    onClick={startLogin}
-                    style={{ padding: '0.5rem 1rem', background: '#007bff', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
-                >
-                    Войти через OAuth
-                </button>
-            </div>
-        )}
-    </div>
-);
+    );
 }
+
 
 document.addEventListener('DOMContentLoaded', () => {
     const root = document.getElementById('comments-root');

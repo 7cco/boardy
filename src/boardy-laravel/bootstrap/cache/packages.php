@@ -20,6 +20,13 @@
       0 => 'Laravel\\Pao\\Laravel\\ServiceProvider',
     ),
   ),
+  'laravel/passport' => 
+  array (
+    'providers' => 
+    array (
+      0 => 'Laravel\\Passport\\PassportServiceProvider',
+    ),
+  ),
   'laravel/socialite' => 
   array (
     'aliases' => 

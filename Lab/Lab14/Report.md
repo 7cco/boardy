@@ -39,6 +39,13 @@ Challenge — это публичный хеш, который передаёт�
 
 ![alt text](screenshots/16-token-exchange.png)
 State защищает от CSRF-атаки на OAuth flow: злоумышленник не может подделать state, сгенерированный приложением. Если убрать проверку — возможна атака authorization code injection: злоумышленник заставляет жертву авторизоваться под своим аккаунтом, а потом подменяет code в callback, вынуждая приложение выдать токены жертве от имени атакующего.
+
+![alt text](screenshots/17-refresh-cookie.png)
+Если refresh_token хранится в localStorage, злоумышленник через XSS может выполнить localStorage.getItem('refresh_token'), украсть его и отправлять на свой сервер. Далее он сможет бесконечно получать новые access_token через silent refresh, полностью скомпрометировав аккаунт жертвы в фоновом режиме.
+Именно поэтому refresh_token кладут в HttpOnly cookie — JavaScript не может её прочитать, даже если XSS сработала.
+
+![alt text](screenshots/18-silent-refresh.png)
+
 ![alt text](screenshots/19-redis-ping.png)
 
 ![alt text](screenshots/20-laravel-publish.png)
