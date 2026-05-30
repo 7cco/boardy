@@ -1,0 +1,19 @@
+<?php
+
+namespace App\Providers;
+
+use Illuminate\Foundation\Support\Providers\AuthServiceProvider as ServiceProvider;
+use Laravel\Passport\Passport;
+
+class AuthServiceProvider extends ServiceProvider
+{
+
+    public function boot(): void
+    {
+        Passport::authorizationView('auth.oauth.authorize');
+        Passport::ignoreRoutes();
+
+        Passport::tokensExpireIn(now()->addMinutes(1));
+        Passport::refreshTokensExpireIn(now()->addDays(30));
+    }
+}
