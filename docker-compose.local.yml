@@ -1,0 +1,21 @@
+services:
+  laravel:
+    build: ./boardy
+    image: ""
+    volumes:
+      - ./boardy:/var/www/html
+      - /var/www/html/vendor
+      - storage:/var/www/html/storage
+
+  fastapi:
+    build: ./boardy-api
+    image: ""
+    volumes:
+      - ./boardy-api:/app
+      - storage:/var/www/html/storage:ro
+      - ./boardy-api/oauth-public.key:/app/oauth-public.key:ro
+
+  vite:
+    volumes:
+      - ./boardy:/var/www/html
+      - node_modules:/var/www/html/node_modules

@@ -1,0 +1,270 @@
+name: Deploy
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: PHP syntax check
+        run: find boardy -name "*.php" -print0 | xargs -0 -n1 php -l
+      - name: Python syntax check
+        run: python -m compileall boardy-api/ -q
+
+  smoke:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup root env file for Docker Compose
+        run: cp .env.example .env
+      
+      - name: Setup Laravel env file
+        run: cp boardy/.env.example boardy/.env
+
+      - name: Build images
+        run: docker compose -f docker-compose.yml -f docker-compose.local.yml build
+      
+      - name: Start stack
+        run: docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+      
+      - name: Create Laravel directories inside container
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.local.yml exec -T laravel mkdir -p /var/www/html/bootstrap/cache
+          docker compose -f docker-compose.yml -f docker-compose.local.yml exec -T laravel mkdir -p /var/www/html/storage/framework/sessions
+          docker compose -f docker-compose.yml -f docker-compose.local.yml exec -T laravel mkdir -p /var/www/html/storage/framework/views
+          docker compose -f docker-compose.yml -f docker-compose.local.yml exec -T laravel mkdir -p /var/www/html/storage/framework/cache/data
+          docker compose -f docker-compose.yml -f docker-compose.local.yml exec -T laravel mkdir -p /var/www/html/storage/logs
+          docker compose -f docker-compose.yml -f docker-compose.local.yml exec -T laravel chown -R www-data:www-data /var/www/html/bootstrap
+          docker compose -f docker-compose.yml -f docker-compose.local.yml exec -T laravel chown -R www-data:www-data /var/www/html/storage
+      
+      - name: Wait for stack
+        run: |
+          for i in {1..30}; do curl -fs http://localhost/health && break; sleep 2; done
+      
+      - name: Check Laravel logs
+        if: failure()
+        run: docker compose -f docker-compose.yml -f docker-compose.local.yml logs laravel
+
+      - name: Smoke endpoints
+        run: |
+          curl -f http://localhost/health
+          curl -f http://localhost/api/health
+      
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.local.yml down -v
+
+  test:
+    runs-on: ubuntu-latest
+    needs: smoke
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Laravel env file
+        run: cp boardy/.env.example boardy/.env
+      
+      - name: Setup Node and build assets
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install Node dependencies
+        working-directory: ./boardy
+        run: npm ci
+      
+      - name: Build assets
+        working-directory: ./boardy
+        run: npm run build
+      
+      #ЗАГЛУШКА ДЛЯ REDIS
+      - name: Override Redis for tests
+        run: |
+          echo "CACHE_STORE=array" >> boardy/.env
+          echo "SESSION_DRIVER=array" >> boardy/.env
+          echo "QUEUE_CONNECTION=sync" >> boardy/.env
+          echo "REDIS_HOST=127.0.0.1" >> boardy/.env
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+      
+      - name: Install PHP deps
+        working-directory: ./boardy
+        run: composer install --no-interaction --prefer-dist
+      
+      - name: Run PHPUnit
+        working-directory: ./boardy
+        run: php artisan test
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install Python deps
+        run: pip install -r boardy-api/requirements.txt pytest httpx
+      
+      - name: Run pytest
+        working-directory: ./boardy-api
+        env:
+          OAUTH_PUBLIC_KEY: ./oauth-public.key
+        run: PYTHONPATH=. pytest -v
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build & push PHP image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./boardy
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}-php:${{ github.sha }}
+            ${{ env.IMAGE_PREFIX }}-php:latest
+      - name: Build & push FastAPI image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./boardy-api
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}-api:${{ github.sha }}
+            ${{ env.IMAGE_PREFIX }}-api:latest
+
+  deploy:
+    runs-on: self-hosted
+    needs: build
+    steps:
+      # Скачиваем репозиторий
+      - uses: actions/checkout@v4
+        with:
+          path: .deploy-repo
+          fetch-depth: 0  # полная история для версионирования
+
+      - name: Sync all necessary files
+        run: |
+          echo "📦 Syncing files to /opt/boardy..."
+          
+          # УДАЛЯЕМ старые папки, которые создал Docker вместо файлов
+          echo "🧹 Cleaning up incorrectly created directories..."
+          rm -rf /opt/boardy/docker/nginx/default.conf
+          rm -rf /opt/boardy/docker/mysql/init.sql
+          rm -rf /opt/boardy/oauth-public.key
+          
+          # Docker compose
+          cp .deploy-repo/docker-compose.yml /opt/boardy/docker-compose.yml
+          
+          # Docker configs (nginx, mysql)
+          mkdir -p /opt/boardy/docker/nginx
+          mkdir -p /opt/boardy/docker/mysql
+          cp .deploy-repo/docker/nginx/default.conf /opt/boardy/docker/nginx/default.conf
+          cp .deploy-repo/docker/mysql/init.sql /opt/boardy/docker/mysql/init.sql
+          
+          # Проверка .env
+          if [ ! -f /opt/boardy/.env ]; then
+            echo "❌ ERROR: /opt/boardy/.env not found!"
+            exit 1
+          fi
+          
+          echo "✅ Files synced successfully"
+          ls -la /opt/boardy/docker/nginx/
+
+      # Логин в GHCR
+      - name: Login to GitHub Container Registry
+        working-directory: /opt/boardy
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      # Pull новых образов
+      - name: Pull latest images
+        working-directory: /opt/boardy
+        run: |
+          echo "⬇️ Pulling latest images..."
+          docker compose pull
+
+      # Деплой с минимальным downtime
+      - name: Deploy with docker compose
+        working-directory: /opt/boardy
+        run: |
+          echo "🚀 Starting deployment..."
+          
+          # Запускаем новые контейнеры
+          docker compose up -d --remove-orphans
+          
+          echo "✅ Deployment completed"
+
+      # Healthcheck
+      - name: Wait for services and health check
+        run: |
+          echo "⏳ Waiting for services to start..."
+          sleep 15
+          
+          echo "🏥 Running health checks..."
+          max_attempts=10
+          attempt=1
+          
+          while [ $attempt -le $max_attempts ]; do
+            echo "Attempt $attempt/$max_attempts..."
+            
+            # Проверяем health endpoint
+            if curl -fs http://localhost/health > /dev/null 2>&1; then
+              echo "✅ Health check passed!"
+              exit 0
+            fi
+            
+            echo "⏳ Service not ready yet, waiting..."
+            sleep 5
+            attempt=$((attempt + 1))
+          done
+          
+          echo "❌ Health check failed after $max_attempts attempts"
+          exit 1
+
+      # Чистка старых образов
+      - name: Cleanup old images
+        if: always()
+        working-directory: /opt/boardy
+        run: |
+          echo "🧹 Cleaning up old Docker images..."
+          docker image prune -af --filter "until=24h"
+          docker system prune -f --volumes=false
+          echo "✅ Cleanup completed"
+
+      # Rollback при ошибке
+      - name: Rollback on failure
+        if: failure()
+        working-directory: /opt/boardy
+        run: |
+          echo "🔄 ROLLBACK: Deployment failed, attempting rollback..."
+          
+          # Останавливаем новые контейнеры
+          docker compose down
+          
+          # Поднимаем предыдущие образы (они ещё не удалены)
+          docker compose up -d --remove-orphans
+          
+          echo "⚠️  Rollback completed. Check the logs manually."
+          
+          # Показываем логи для диагностики
+          docker compose logs --tail=50
