@@ -14,13 +14,12 @@ services:
       - boardy_net 
 
   laravel: 
-    # ИЗМЕНЕНИЕ: вместо build используем готовый образ из GHCR
     image: ghcr.io/7cco/boardy-php:latest 
     volumes: 
       - storage:/var/www/html/storage 
       - public_build:/var/www/html/public/build
     env_file: 
-      - .env # На сервере файл .env должен лежать рядом с docker-compose.yml
+      - .env
     depends_on: 
       mysql: 
         condition: service_healthy 
