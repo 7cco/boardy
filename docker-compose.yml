@@ -1,0 +1,111 @@
+services: 
+  nginx: 
+    image: nginx:alpine 
+    ports: 
+      - "80:80" 
+      - "443:443" 
+    volumes: 
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf
+      - public_build:/var/www/html/public/build 
+    depends_on: 
+      - laravel 
+      - fastapi 
+    networks: 
+      - boardy_net 
+
+  laravel: 
+    # ИЗМЕНЕНИЕ: вместо build используем готовый образ из GHCR
+    image: ghcr.io/7cco/boardy-php:latest 
+    volumes: 
+      - storage:/var/www/html/storage 
+      - public_build:/var/www/html/public/build
+    env_file: 
+      - .env # На сервере файл .env должен лежать рядом с docker-compose.yml
+    depends_on: 
+      mysql: 
+        condition: service_healthy 
+      redis: 
+        condition: service_healthy 
+    networks: 
+      - boardy_net 
+
+  vite:
+    image: node:20-alpine
+    working_dir: /var/www/html
+    volumes:
+      - ./boardy:/var/www/html # Для Vite маппинг оставляем, если он нужен на сервере
+      - node_modules:/var/www/html/node_modules
+    ports:
+      - "5173:5173"
+    command: sh -c "npm install && npm run build"
+    networks:
+      - boardy_net
+    depends_on:
+      - laravel
+
+  fastapi: 
+    image: ghcr.io/7cco/boardy-api:latest 
+    volumes: 
+      - storage:/var/www/html/storage:ro
+    environment: 
+      DB_HOST: mysql 
+      DB_USER: ${DB_USER} 
+      DB_PASSWORD: ${DB_PASSWORD} 
+      REDIS_HOST: redis 
+      OAUTH_PUBLIC_KEY: /app/oauth-public.key 
+    depends_on: 
+      mysql:
+        condition: service_healthy 
+      redis: 
+        condition: service_healthy 
+    networks: 
+      - boardy_net 
+
+  mysql: 
+    image: mysql:8 
+    environment: 
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD} 
+      MYSQL_USER: ${DB_USER} 
+      MYSQL_PASSWORD: ${DB_PASSWORD} 
+    volumes: 
+      - mysql_data:/var/lib/mysql 
+      - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql 
+    healthcheck: 
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"] 
+      interval: 5s 
+      retries: 10 
+    networks: 
+      - boardy_net 
+
+  redis: 
+    image: redis:7-alpine 
+    volumes: 
+      - redis_data:/data 
+    healthcheck: 
+      test: ["CMD", "redis-cli", "ping"] 
+      interval: 5s 
+      retries: 10 
+    networks: 
+      - boardy_net 
+
+  adminer:
+    image: adminer:latest
+    ports:
+      - "8080:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: mysql
+    networks:
+      - boardy_net
+    depends_on:
+      - mysql
+ 
+volumes: 
+  mysql_data: 
+  redis_data: 
+  storage: 
+  node_modules:
+  public_build:
+
+networks: 
+  boardy_net: 
+    driver: bridge 
